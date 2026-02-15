@@ -1,0 +1,235 @@
+#include <HX711_ADC.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#if defined(ESP8266) || defined(ESP32) || defined(AVR)
+#include <EEPROM.h>
+#endif
+
+const int HX711_dout = 4;
+const int HX711_sck = 5;
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+HX711_ADC LoadCell(HX711_dout, HX711_sck);
+
+const int calVal_eepromAdress = 0; // Alamat EEPROM untuk menyimpan nilai kalibrasi
+unsigned long t = 0;
+
+void setup() {
+  Serial.begin(9600); delay(10);
+  Serial.println("\nStarting...");
+
+  lcd.init();
+  lcd.backlight();
+  
+  LoadCell.begin();
+  unsigned long stabilizingtime = 2000;
+  boolean _tare = true;
+  LoadCell.start(stabilizingtime, _tare);
+
+  if (LoadCell.getTareTimeoutFlag() || LoadCell.getSignalTimeoutFlag()) {
+    Serial.println("Timeout, check wiring");
+    lcd.setCursor(0, 0);
+    lcd.print("Wiring Error");
+    while (1);
+  } else {
+    LoadCell.setCalFactor(1.0);
+    Serial.println("Startup complete");
+    delay(1000);
+    lcd.clear();
+  }
+
+  // Baca kalibrasi dari EEPROM dan terapkan ke LoadCell
+  float calibrationValue;
+  EEPROM.get(calVal_eepromAdress, calibrationValue);
+  LoadCell.setCalFactor(calibrationValue); // Set cal factor dari EEPROM
+  Serial.print("Loaded calibration factor: ");
+  Serial.println(calibrationValue);
+
+  while (!LoadCell.update());
+
+  Serial.print("Calibration value: ");
+  Serial.println(LoadCell.getCalFactor());
+
+  calibrate();
+}
+
+void loop() {
+  static boolean newDataReady = 0;
+  const int serialPrintInterval = 1000;
+
+  if (LoadCell.update()) newDataReady = true;
+
+  if (newDataReady) {
+    if (millis() > t + serialPrintInterval) {
+      float kg = LoadCell.getData();  // langsung kg karena kalibrasi pakai kg
+
+      Serial.print("Load_cell output val (kg): ");
+      if (kg == (int)kg) {
+        Serial.println((int)kg);
+      } else {
+        Serial.println(kg, 2);
+      }
+
+      lcd.setCursor(0, 0);
+      lcd.print("Berat(kg):      ");
+      lcd.setCursor(9, 0);
+      if (kg == (int)kg) {
+        lcd.print((int)kg);
+      } else {
+        lcd.print(kg, 2);
+      }
+
+      newDataReady = 0;
+      t = millis();
+    }
+  }
+
+  if (Serial.available() > 0) {
+    char inByte = Serial.read();
+    if (inByte == 't') LoadCell.tareNoDelay();
+    else if (inByte == 'r') calibrate();
+    else if (inByte == 'c') changeSavedCalFactor();
+  }
+
+  if (LoadCell.getTareStatus() == true) {
+    Serial.println("Tare complete");
+    lcd.setCursor(0, 1);
+    lcd.print("Tare Selesai   ");
+  }
+}
+
+void calibrate() {
+  Serial.println("***");
+  Serial.println("Start calibration:");
+  Serial.println("Send 't' to tare.");
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Kalibrasi");
+  lcd.setCursor(0, 1);
+  lcd.print("Tunggu 't'...");
+
+  boolean _resume = false;
+  while (!_resume) {
+    LoadCell.update();
+    if (Serial.available() > 0) {
+      char inByte = Serial.read();
+      if (inByte == 't') LoadCell.tareNoDelay();
+    }
+    if (LoadCell.getTareStatus()) {
+      Serial.println("Tare complete");
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Tare OK");
+      _resume = true;
+    }
+  }
+
+  Serial.println("Place known mass in **KILOGRAM**, then send its weight (e.g. 0.5)");
+
+  float known_mass = 0;
+  _resume = false;
+  lcd.setCursor(0, 1);
+  lcd.print("Input berat(kg)");
+
+  while (!_resume) {
+    LoadCell.update();
+    if (Serial.available() > 0) {
+      known_mass = Serial.parseFloat();
+      if (known_mass != 0) {
+        Serial.print("Known mass is: ");
+        Serial.println(known_mass);
+        _resume = true;
+      }
+    }
+  }
+
+  LoadCell.refreshDataSet();
+  float newCalibrationValue = LoadCell.getNewCalibration(known_mass);
+
+  Serial.print("New calFactor: ");
+  Serial.println(newCalibrationValue);
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Kalibrasi OK");
+  lcd.setCursor(0, 1);
+  lcd.print("CF:");
+  lcd.print(newCalibrationValue, 1);
+  delay(3000);
+  lcd.clear();
+
+  Serial.print("Save to EEPROM? y/n");
+  _resume = false;
+
+  while (!_resume) {
+    if (Serial.available() > 0) {
+      char inByte = Serial.read();
+      if (inByte == 'y') {
+#if defined(ESP8266)|| defined(ESP32)
+        EEPROM.begin(512);
+#endif
+        EEPROM.put(calVal_eepromAdress, newCalibrationValue);
+#if defined(ESP8266)|| defined(ESP32)
+        EEPROM.commit();
+#endif
+        EEPROM.get(calVal_eepromAdress, newCalibrationValue);
+        Serial.print("Saved: ");
+        Serial.println(newCalibrationValue);
+        _resume = true;
+      }
+      else if (inByte == 'n') {
+        Serial.println("Not saved.");
+        _resume = true;
+      }
+    }
+  }
+
+  Serial.println("Calibration done.");
+}
+
+void changeSavedCalFactor() {
+  float oldCalibrationValue = LoadCell.getCalFactor();
+  Serial.print("Current CF: ");
+  Serial.println(oldCalibrationValue);
+
+  Serial.println("Send new CF value:");
+
+  boolean _resume = false;
+  float newCalibrationValue;
+
+  while (!_resume) {
+    if (Serial.available() > 0) {
+      newCalibrationValue = Serial.parseFloat();
+      if (newCalibrationValue != 0) {
+        Serial.print("New CF: ");
+        Serial.println(newCalibrationValue);
+        LoadCell.setCalFactor(newCalibrationValue);
+        _resume = true;
+      }
+    }
+  }
+
+  Serial.print("Save to EEPROM? y/n ");
+  _resume = false;
+  while (!_resume) {
+    if (Serial.available() > 0) {
+      char inByte = Serial.read();
+      if (inByte == 'y') {
+#if defined(ESP8266)|| defined(ESP32)
+        EEPROM.begin(512);
+#endif
+        EEPROM.put(calVal_eepromAdress, newCalibrationValue);
+#if defined(ESP8266)|| defined(ESP32)
+        EEPROM.commit();
+#endif
+        Serial.println("Saved.");
+        _resume = true;
+      }
+      else if (inByte == 'n') {
+        Serial.println("Not saved.");
+        _resume = true;
+      }
+    }
+  }
+
+  Serial.println("Calibration factor updated.");
+}
