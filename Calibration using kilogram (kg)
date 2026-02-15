@@ -10,7 +10,7 @@ const int HX711_sck = 5;
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 HX711_ADC LoadCell(HX711_dout, HX711_sck);
 
-const int calVal_eepromAdress = 0; // Alamat EEPROM untuk menyimpan nilai kalibrasi
+const int calVal_eepromAdress = 0;
 unsigned long t = 0;
 
 void setup() {
@@ -60,7 +60,7 @@ void loop() {
 
   if (newDataReady) {
     if (millis() > t + serialPrintInterval) {
-      float kg = LoadCell.getData();  // langsung kg karena kalibrasi pakai kg
+      float kg = LoadCell.getData();
 
       Serial.print("Load_cell output val (kg): ");
       if (kg == (int)kg) {
